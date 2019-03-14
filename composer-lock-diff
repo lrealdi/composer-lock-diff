@@ -47,14 +47,14 @@ function diff($key, $from, $to, $base_path) {
     $data = load($from, $base_path);
 
     foreach($data->$key as $pkg) {
-        $pkgs[$pkg->name] = array(version($pkg), 'REMOVED', '');
+        $pkgs[$pkg->name] = array(version($pkg), 'REMOVED', '', sourceUrl($pkg, $pkgs));
     }
 
     $data = load($to, $base_path);
 
     foreach($data->$key as $pkg) {
         if (! array_key_exists($pkg->name, $pkgs)) {
-            $pkgs[$pkg->name] = array('NEW', version($pkg), '');
+            $pkgs[$pkg->name] = array('NEW', version($pkg), '', sourceUrl($pkg, $pkgs));
             continue;
         }
 
@@ -63,6 +63,7 @@ function diff($key, $from, $to, $base_path) {
         } else {
             $pkgs[$pkg->name][1] = version($pkg);
             $pkgs[$pkg->name][2] = makeCompareUrl($pkg, $pkgs);
+            $pkgs[$pkg->name][3] = sourceUrl($pkg, $pkgs);
         }
     }
 
@@ -88,6 +89,7 @@ function tableize($header, $data, $opts = array()) {
     if ($opts['no-links']) {
         array_walk($data, function(&$values) {
             unset($values[2]);
+            unset($values[3]);
         });
     } else {
         if (array_key_exists('url_formatter', $opts)) {
@@ -100,11 +102,12 @@ function tableize($header, $data, $opts = array()) {
 
     $titles = array($header, 'From', 'To');
     if (! $opts['no-links']) array_push($titles, 'Compare');
+    if (! $opts['no-links'] && ! array_key_exists('url_formatter', $opts)) array_push($titles, 'Source');
 
     $widths = array(maxLength(array_merge(array($header), array_keys($data))));
 
-    $count = count(reset($data));
-    for($i = 0; $i < $count; $i++) {
+    $count = count($titles);
+    for($i = 0; $i < $count - 1; $i++) {
         $widths[] = max(strlen($titles[$i + 1]), maxLength(array_map(function($k) use ($data, $i) { return $data[$k][$i]; }, array_keys($data))));
     }
 
@@ -116,6 +119,10 @@ function tableize($header, $data, $opts = array()) {
     $lines[] = separatorLine($widths, $opts['joint']);
 
     foreach($data as $key => $v) {
+        if (array_key_exists('url_formatter', $opts)) {
+            $key = call_user_func($opts['url_formatter'], $v[3], $key);
+            $v = array_slice($v, 0, 3);
+        }
         $lines[] = tabelizeLine(array_merge(array($key), $v), $widths);
     }
 
@@ -211,6 +218,13 @@ function mustDecodeJson($json, $context) {
 function makeCompareUrl($pkg, $diff) {
     $func = 'formatCompare' . ucfirst(getSourceRepoType((string) @$pkg->source->url));
     return call_user_func($func, $pkg->source->url, $diff[$pkg->name][0], $diff[$pkg->name][1]);
+}
+
+function sourceUrl($pkg) {
+    if (empty($pkg->source->url)) {
+        return '';
+    }
+    return str_replace('.git', '', $pkg->source->url);
 }
 
 function getSourceRepoType($url) {
