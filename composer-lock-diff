@@ -13,6 +13,41 @@ if (! $opts['only-prod']) {
     $changes['changes-dev'] = diff('packages-dev', $opts['from'], $opts['to'], $opts['path']);
 }
 
+$changeLog = array();
+
+if ($opts['changelog']) {
+    $token = getenv('GITHUB_TOKEN');
+    $tokenQueryString = '';
+    if ($token){
+        $tokenQueryString = "?access_token=" . $token;
+    }
+    $changeLog['diffVersions'] = array();
+    $changeLog['commitMessages'] = array();
+    foreach($changes as $k => $diff) {
+        foreach ($diff as $repo => $values) {
+            $changeLog['diffVersions'][$repo] = $values;
+            if (!empty($values[2])){
+                $compareUrl = $values[2];
+                if (strpos($compareUrl, 'github.com') !== false){
+                    $apiCompareUrl = str_replace('https://github.com', 'https://api.github.com/repos', $compareUrl) . $tokenQueryString;
+                    $context = stream_context_create(['http' => ['method' => 'GET','header' => ['User-Agent: PHP']]]);
+                    $compareResponse = @file_get_contents($apiCompareUrl, false, $context);
+                    if ($compareResponse){
+                        $compareData = json_decode($compareResponse, true);
+                        if(isset($compareData['commits'])){
+                            foreach ($compareData['commits'] as $commit) {
+                                $message = $commit['commit']['message'];
+                                $changeLog['commitMessages'][$repo][] = $message;
+                                $changes[$k][$repo]['commits'][] = $message;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 if ($opts['json']) {
     $json_opts = ($opts['pretty']) ? JSON_PRETTY_PRINT : 0;
     print json_encode($changes, $json_opts);
@@ -36,9 +71,55 @@ $table_titles = [
     'changes-dev' => 'Dev Changes',
 ];
 
-foreach($changes as $k => $diff) {
-    print tableize($table_titles[$k], $diff, $table_opts);
+if ($opts['text']) {
+    foreach($changes as $k => $diff) {
+        foreach ($diff as $repo => $values) {
+            if (!empty($values[0])){
+                print "Updating $repo (" . $values[0] . " => " . $values[1] . ") \n";
+            }else{
+                print "Installing $repo (" . $values[1] . ") \n";
+            }
+        }
+    }
+    print "\n";
+}else{
+    if ($opts['title']) {
+        print trim($opts['title']) . "\n\n";
+    }
+
+    foreach($changes as $k => $diff) {
+        print tableize($table_titles[$k], $diff, $table_opts);
+    }
 }
+
+if ($opts['changelog']) {
+    foreach ($changeLog['commitMessages'] as $repo => $messages) {
+        $diffVersion = $changeLog['diffVersions'][$repo];
+        if($opts['md']){
+            if ($opts['no-links']) {
+                print "### $repo changes between " . $diffVersion[0] . " and " . $diffVersion[1] . "\n";
+            }else{
+                print "### " . urlFormatterMd($diffVersion[2], "$repo changes between " . $diffVersion[0] . " and " . $diffVersion[1]) . "\n";
+            }
+
+        }else{
+            $links = " (" . $diffVersion[2] . ")";
+            if (!$opts['no-links']) {
+                $links = '';
+            }
+            print "$repo changes between " . $diffVersion[0] . " and " . $diffVersion[1] . $links . "\n";
+        }
+        foreach ($messages as $message) {
+            $messageWithoutLineBreaks = str_replace(array("\r\n", "\r", "\n"), ' ', $message);
+            if($opts['md'])
+                print " * $messageWithoutLineBreaks \n";
+            else
+                print " - $messageWithoutLineBreaks \n";
+        }
+        print "\n";
+    }
+}
+
 
 function diff($key, $from, $to, $base_path) {
 
@@ -82,6 +163,10 @@ function version($pkg)
 
 function tableize($header, $data, $opts = array()) {
     if (empty($data)) return '';
+
+    foreach($data as $key => $v) {
+        unset($data[$key]['commits']);
+    }
 
     $opts = array_merge(array('capped' => true, 'joint' => '+'), $opts);
 
@@ -193,7 +278,8 @@ function load($fileish, $base_path = '') {
 }
 
 function isUrl($string) {
-    return filter_var($string, FILTER_VALIDATE_URL, FILTER_FLAG_PATH_REQUIRED);
+    return filter_var($string, FILTER_VALIDATE_URL,
+        FILTER_FLAG_SCHEME_REQUIRED | FILTER_FLAG_HOST_REQUIRED | FILTER_FLAG_PATH_REQUIRED);
 }
 
 function mustDecodeJson($json, $context) {
@@ -213,12 +299,6 @@ function makeCompareUrl($pkg, $diff) {
 }
 
 function getSourceRepoType($url) {
-    if (preg_match('/^git@bitbucket.org:(.*)\.git$/', $url)) {
-        return 'bitbucket';
-    }
-    if (preg_match('/^git@github.com:(.*)\.git$/', $url)) {
-        return 'github';
-    }
     if (! preg_match('/^http/i', $url)) {
         return 'unknown';
     }
@@ -241,13 +321,11 @@ function formatCompareUnknown($url, $from, $to) {
 }
 
 function formatCompareGithub($url, $from, $to) {
-    $url = preg_replace(['/\.git$/', '/^git@github.com:/'], ['', 'https://github.com/'], $url);
-    return sprintf('%s/compare/%s...%s', $url, urlencode($from), urlencode($to));
+    return sprintf('%s/compare/%s...%s', preg_replace('/\.git$/', '', $url), urlencode($from), urlencode($to));
 }
 
 function formatCompareBitbucket($url, $from, $to) {
-    $url = preg_replace(['/\.git$/', '/^git@bitbucket.org:/'], ['', 'https://bitbucket.org/'], $url);
-    return sprintf('%s/branches/compare/%s%%0D%s', $url, urlencode($to), urlencode($from));
+    return sprintf('%s/branches/compare/%s%%0D%s', preg_replace('/\.git$/', '', $url), urlencode($from), urlencode($to));
 }
 
 function formatCompareGitlab($url, $from, $to) {
@@ -255,7 +333,7 @@ function formatCompareGitlab($url, $from, $to) {
 }
 
 function parseOpts() {
-    $given = getopt('hp:', array('path:', 'from:', 'to:', 'md', 'json', 'pretty', 'no-links', 'only-prod', 'only-dev', 'help'));
+    $given = getopt('hp:', array('path:', 'from:', 'to:', 'md', 'text', 'changelog', 'title:', 'json', 'pretty', 'no-links', 'only-prod', 'only-dev', 'help'));
 
     foreach(array('help' => 'h', 'path' => 'p') as $long => $short) {
         if (array_key_exists($short, $given)) {
@@ -273,6 +351,9 @@ function parseOpts() {
         'from' => array_key_exists('from', $given) ? $given['from'] : 'HEAD',
         'to' => array_key_exists('to', $given) ? $given['to'] : '',
         'md' => array_key_exists('md', $given),
+        'text' => array_key_exists('text', $given),
+        'changelog' => array_key_exists('changelog', $given),
+        'title' => array_key_exists('title', $given) ? $given['title'] : '',
         'json' => array_key_exists('json', $given),
         'pretty' => version_compare(PHP_VERSION, '5.4.0', '>=') && array_key_exists('pretty', $given),
         'no-links' => array_key_exists('no-links', $given),
@@ -294,6 +375,9 @@ Options:
   --json       Format output as JSON
   --pretty     Pretty print JSON output (PHP >= 5.4.0)
   --md         Use markdown instead of plain text
+  --text       Format output as simple text
+  --changelog  Add commit messages in output
+  --title      Add title in output
   --no-links   Don't include Compare links in plain text or any links in markdown
   --only-prod  Only include changes from `packages`
   --only-dev   Only include changes from `packages-dev`
@@ -302,4 +386,3 @@ EOF;
 
     exit(0);
 }
-
